@@ -85,7 +85,10 @@ def fetch_and_save(ticker):
         shareholders_equity = latest_bs.get('Total Stockholder Equity') or latest_bs.get('Shareholders Equity')
         total_assets = latest_bs.get('Total Assets')
         total_debt = latest_bs.get('Total Debt') or (latest_bs.get('Long Term Debt') + latest_bs.get('Short Term Debt') if pd.notna(latest_bs.get('Long Term Debt')) and pd.notna(latest_bs.get('Short Term Debt')) else None)
-        cash_and_equivalents = latest_bs.get('Cash And Cash Equivalents') or latest_bs.get('Cash')
+        # Cash and Short Term Investments
+        cash_equivalents = latest_bs.get('Cash And Cash Equivalents', 0) or latest_bs.get('Cash', 0)
+        short_term_investments = latest_bs.get('Short Term Investments', 0)
+        cash_and_equivalents = cash_equivalents + short_term_investments
         
         # Prepare data dict
         data = {
@@ -266,7 +269,10 @@ def process_excel_file(file_path='data_population.xlsx'):
                     if pd.notna(latest_bs.get('Long Term Debt')) and pd.notna(latest_bs.get('Short Term Debt'))
                     else None
                 )
-                cash_and_equivalents = latest_bs.get('Cash And Cash Equivalents') or latest_bs.get('Cash')
+                # Cash and Short Term Investments
+                cash_equivalents = latest_bs.get('Cash And Cash Equivalents', 0) or latest_bs.get('Cash', 0)
+                short_term_investments = latest_bs.get('Short Term Investments', 0)
+                cash_and_equivalents = cash_equivalents + short_term_investments
                 
                 # Tax Rate: Calculate as Tax Provision / EBIT if EBIT > 0
                 tax_rate = (tax_provision_ttm / ebit_ttm) if (tax_provision_ttm and ebit_ttm and ebit_ttm != 0) else None
