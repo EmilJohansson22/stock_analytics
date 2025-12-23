@@ -19,8 +19,9 @@ def fetch_and_save(ticker):
         q_cf = t.quarterly_cashflow
         q_bs = t.quarterly_balance_sheet
         
-        # Annual statements (for oldest revenue)
+        # Annual statements (for oldest revenue and fallbacks)
         a_is = t.financials
+        a_cf = t.cashflow
         
         # Basic info
         currency = info.get('financialCurrency', 'N/A')  # Use financialCurrency for reporting currency
@@ -29,7 +30,7 @@ def fetch_and_save(ticker):
         shares_outstanding = None
         shares_type = None
         if not q_is.empty:
-            for key in ['Diluted Average Shares', 'Weighted Average Diluted Shares Outstanding', 'Diluted Shares Outstanding', 'Basic Average Shares', 'Weighted Average Basic Shares Outstanding', 'Basic Shares Outstanding']:
+            for key in ['Diluted Average Shares', 'Weighted Average Diluted Shares Outstanding', 'Diluted Shares Outstanding', 'Basic Average Shares', 'Weighted Average Basic Shares Outstanding', 'Basic Shares Outstanding', 'Common Stock Shares Outstanding', 'Shares Outstanding']:
                 if key in q_is.index:
                     shares_outstanding = q_is.loc[key, q_is.columns[0]]
                     shares_type = key
@@ -37,39 +38,65 @@ def fetch_and_save(ticker):
         if shares_outstanding is None:
             shares_outstanding = info.get('sharesOutstanding')
             shares_type = "Current Shares Outstanding"
+        if shares_outstanding is None:
+            print(f"Debug: Shares not found for {ticker}. Checked q_is keys: {list(q_is.index) if not q_is.empty else 'Empty'}, info keys: {list(info.keys()) if info else 'Empty'}")
         
-        # TTM calculations (sum last 4 quarters if available)
-        def sum_ttm(series, key_variants):
-            if series.empty:
-                return None
-            # Find the column with the data
-            for variant in key_variants:
-                if variant in series.index:
-                    vals = series.loc[variant, series.columns[:4]].dropna()
-                    return vals.sum() if len(vals) > 0 else None
+        # TTM calculations (sum last 4 quarters if available, fallback to latest annual)
+        def sum_ttm(series, key_variants, annual_series=None, is_revenue=False):
+            if not series.empty:
+                for variant in key_variants:
+                    if variant in series.index:
+                        # Collect up to 4 non-NaN values from the series
+                        vals = []
+                        for col in series.columns:
+                            val = series.loc[variant, col]
+                            if pd.notna(val):
+                                vals.append(val)
+                            if len(vals) >= 4:
+                                break
+                        if len(vals) >= 4:
+                            total = sum(vals[:4])  # Sum the first 4
+                            if is_revenue:
+                                print(f"Debug: Revenue TTM for {ticker} summed from quarterly: {vals[:4]} = {total}")
+                            return total
+            # Fallback to latest annual if quarterly empty or no data
+            if annual_series is not None and not annual_series.empty:
+                for variant in key_variants:
+                    if variant in annual_series.index:
+                        val = annual_series.loc[variant, annual_series.columns[0]]
+                        if pd.notna(val):
+                            if is_revenue:
+                                print(f"Debug: Revenue TTM for {ticker} from annual: {val}")
+                            return val
             return None
         
-        ebit_ttm = sum_ttm(q_is, ['Operating Income', 'EBIT', 'Operating income'])  # Assuming EBITA means EBIT
-        ebitda_ttm = sum_ttm(q_is, ['EBITDA'])
-        net_income_ttm = sum_ttm(q_is, ['Net Income'])
-        revenue_ttm = sum_ttm(q_is, ['Total Revenue', 'Revenue'])
-        cost_of_revenue_ttm = sum_ttm(q_is, ['Cost Of Revenue', 'Cost of Revenue'])
-        operating_expenses_ttm = sum_ttm(q_is, ['Operating Expense', 'Operating Expenses'])
-        tax_provision_ttm = sum_ttm(q_is, ['Tax Provision', 'Income Tax Expense'])
-        depreciation_amortization_ttm = sum_ttm(q_cf, ['Depreciation And Amortization', 'Depreciation'])
-        capital_expenditures_ttm = sum_ttm(q_cf, ['Capital Expenditures', 'Capital Expenditure', 'Capex', 'Property, Plant and Equipment', 'Additions to Property, Plant and Equipment'])
+        ebit_ttm = sum_ttm(q_is, ['Operating Income', 'EBIT', 'Operating income'], a_is)
+        ebitda_ttm = sum_ttm(q_is, ['EBITDA'], a_is)
+        net_income_ttm = sum_ttm(q_is, ['Net Income'], a_is)
+        revenue_ttm = sum_ttm(q_is, ['Total Revenue', 'Revenue'], a_is, is_revenue=True)
+        cost_of_revenue_ttm = sum_ttm(q_is, ['Cost Of Revenue', 'Cost of Revenue'], a_is)
+        operating_expenses_ttm = sum_ttm(q_is, ['Operating Expense', 'Operating Expenses'], a_is)
+        tax_provision_ttm = sum_ttm(q_is, ['Tax Provision', 'Income Tax Expense'], a_is)
+        depreciation_amortization_ttm = sum_ttm(q_cf, ['Depreciation And Amortization', 'Depreciation'], a_cf)
+        capital_expenditures_ttm = sum_ttm(q_cf, ['Capital Expenditures', 'Capital Expenditure', 'Capex', 'Property, Plant and Equipment', 'Additions to Property, Plant and Equipment', 'Purchase of Property, Plant and Equipment', 'Net Investment in Property, Plant and Equipment', 'Capital Spending', 'Investments in Property, Plant and Equipment', 'Acquisition of Property, Plant and Equipment'], a_cf)
         # Ensure CapEX is positive (outflow)
         if capital_expenditures_ttm is not None:
             capital_expenditures_ttm = abs(capital_expenditures_ttm)
         
-        # Change in Working Capital (from cash flow, TTM sum)
-        change_wc_ttm = sum_ttm(q_cf, ['Change In Working Capital'])
+        # Change in Working Capital (from cash flow, TTM sum, fallback to annual)
+        change_wc_ttm = sum_ttm(q_cf, ['Change In Working Capital'], a_cf)
         # Ensure Change in WC is positive (outflow magnitude)
         if change_wc_ttm is not None:
             change_wc_ttm = abs(change_wc_ttm)
         
-        # Revenue TTM Date: Date of latest quarterly report
-        revenue_ttm_date = q_is.columns[0] if not q_is.empty else None
+        # Revenue TTM Date: Date of latest quarterly report, fallback to annual
+        revenue_ttm_date = None
+        if not q_is.empty:
+            revenue_ttm_date = q_is.columns[0]
+        elif not a_is.empty:
+            revenue_ttm_date = a_is.columns[0]
+        if isinstance(revenue_ttm_date, pd.Timestamp):
+            revenue_ttm_date = str(revenue_ttm_date.date())  # Convert to string date
         
         # Oldest Annual Revenue and Date
         oldest_annual_revenue = None
@@ -80,8 +107,10 @@ def fetch_and_save(ticker):
                 oldest_annual_revenue = a_is.loc['Total Revenue', oldest_col]
             oldest_revenue_date = oldest_col
         
-        # Balance Sheet (latest quarterly)
+        # Balance Sheet (latest quarterly, fallback to annual)
         latest_bs = q_bs.iloc[:, 0] if not q_bs.empty else pd.Series(dtype=float)
+        if latest_bs.empty and not t.balance_sheet.empty:
+            latest_bs = t.balance_sheet.iloc[:, 0]
         shareholders_equity = latest_bs.get('Total Stockholder Equity') or latest_bs.get('Shareholders Equity')
         total_assets = latest_bs.get('Total Assets')
         total_debt = latest_bs.get('Total Debt') or (latest_bs.get('Long Term Debt') + latest_bs.get('Short Term Debt') if pd.notna(latest_bs.get('Long Term Debt')) and pd.notna(latest_bs.get('Short Term Debt')) else None)
@@ -147,6 +176,12 @@ def process_excel_file(file_path='data_population.xlsx'):
         df = pd.read_excel(file_path, header=0)
         # No drop needed since Row 1 is headers, Row 2+ is data
         
+        # Convert string columns to object to avoid FutureWarnings
+        string_columns = ['Currency', 'Nationality', 'Revenue TTM Date', 'Oldest Revenue Year', 'Notes']
+        for col in string_columns:
+            if col in df.columns:
+                df[col] = df[col].fillna('').astype(str)
+        
         ticker_column = 'Yahoo Ticker'  # Use 'Yahoo Ticker' as the column for tickers
         if ticker_column not in df.columns:
             print(f"Error: '{ticker_column}' column not found in the Excel file.")
@@ -176,6 +211,13 @@ def process_excel_file(file_path='data_population.xlsx'):
                 q_cf = t.quarterly_cashflow
                 q_bs = t.quarterly_balance_sheet
                 a_is = t.financials
+                a_cf = t.cashflow
+                
+                # Check if all required statements are empty
+                if q_is.empty and a_is.empty and q_cf.empty and a_cf.empty and q_bs.empty and t.balance_sheet.empty:
+                    print(f"Debug: No financial statements available for {ticker}. Skipping update.")
+                    df.at[idx, 'Notes'] = "No financial statements available"
+                    continue
                 
                 # Basic info
                 currency = info.get('financialCurrency', 'N/A')  # Use financialCurrency for reporting currency
@@ -184,7 +226,7 @@ def process_excel_file(file_path='data_population.xlsx'):
                 shares_outstanding = None
                 shares_type = None
                 if not q_is.empty:
-                    for key in ['Diluted Average Shares', 'Weighted Average Diluted Shares Outstanding', 'Diluted Shares Outstanding', 'Basic Average Shares', 'Weighted Average Basic Shares Outstanding', 'Basic Shares Outstanding']:
+                    for key in ['Diluted Average Shares', 'Weighted Average Diluted Shares Outstanding', 'Diluted Shares Outstanding', 'Basic Average Shares', 'Weighted Average Basic Shares Outstanding', 'Basic Shares Outstanding', 'Common Stock Shares Outstanding', 'Shares Outstanding']:
                         if key in q_is.index:
                             shares_outstanding = q_is.loc[key, q_is.columns[0]]
                             shares_type = key
@@ -192,32 +234,55 @@ def process_excel_file(file_path='data_population.xlsx'):
                 if shares_outstanding is None:
                     shares_outstanding = info.get('sharesOutstanding')
                     shares_type = "Current Shares Outstanding"
+                if shares_outstanding is None:
+                    print(f"Debug: Shares not found for {ticker}. Checked q_is keys: {list(q_is.index) if not q_is.empty else 'Empty'}, info keys: {list(info.keys()) if info else 'Empty'}")
                 
-                # TTM calculations
-                def sum_ttm(series, key_variants):
-                    if series.empty:
-                        return None
-                    for variant in key_variants:
-                        if variant in series.index:
-                            vals = series.loc[variant, series.columns[:4]].dropna()
-                            return vals.sum() if len(vals) > 0 else None
+                # TTM calculations (sum last 4 quarters if available, fallback to latest annual)
+                def sum_ttm(series, key_variants, annual_series=None, is_revenue=False):
+                    if not series.empty:
+                        for variant in key_variants:
+                            if variant in series.index:
+                                # Collect up to 4 non-NaN values from the series
+                                vals = []
+                                for col in series.columns:
+                                    val = series.loc[variant, col]
+                                    if pd.notna(val):
+                                        vals.append(val)
+                                    if len(vals) >= 4:
+                                        break
+                                if len(vals) >= 4:
+                                    total = sum(vals[:4])  # Sum the first 4
+                                    if is_revenue:
+                                        print(f"Debug: Revenue TTM for {ticker} summed from quarterly: {vals[:4]} = {total}")
+                                    return total
+                    # Fallback to latest annual if quarterly empty or no data
+                    if annual_series is not None and not annual_series.empty:
+                        for variant in key_variants:
+                            if variant in annual_series.index:
+                                val = annual_series.loc[variant, annual_series.columns[0]]
+                                if pd.notna(val):
+                                    if is_revenue:
+                                        print(f"Debug: Revenue TTM for {ticker} from annual: {val}")
+                                    return val
                     return None
                 
-                ebit_ttm = sum_ttm(q_is, ['Operating Income', 'EBIT', 'Operating income'])
-                ebitda_ttm = sum_ttm(q_is, ['EBITDA'])
-                net_income_ttm = sum_ttm(q_is, ['Net Income'])
-                revenue_ttm = sum_ttm(q_is, ['Total Revenue', 'Revenue'])
-                cost_of_revenue_ttm = sum_ttm(q_is, ['Cost Of Revenue', 'Cost of Revenue'])
-                operating_expenses_ttm = sum_ttm(q_is, ['Operating Expense', 'Operating Expenses'])
-                tax_provision_ttm = sum_ttm(q_is, ['Tax Provision', 'Income Tax Expense'])
-                depreciation_amortization_ttm = sum_ttm(q_cf, ['Depreciation And Amortization', 'Depreciation'])
-                capital_expenditures_ttm = sum_ttm(q_cf, ['Capital Expenditures', 'Capital Expenditure', 'Capex', 'Property, Plant and Equipment', 'Additions to Property, Plant and Equipment'])
+                ebit_ttm = sum_ttm(q_is, ['Operating Income', 'EBIT', 'Operating income'], a_is)
+                ebitda_ttm = sum_ttm(q_is, ['EBITDA'], a_is)
+                net_income_ttm = sum_ttm(q_is, ['Net Income'], a_is)
+                revenue_ttm = sum_ttm(q_is, ['Total Revenue', 'Revenue'], a_is, is_revenue=True)
+                cost_of_revenue_ttm = sum_ttm(q_is, ['Cost Of Revenue', 'Cost of Revenue'], a_is)
+                operating_expenses_ttm = sum_ttm(q_is, ['Operating Expense', 'Operating Expenses'], a_is)
+                tax_provision_ttm = sum_ttm(q_is, ['Tax Provision', 'Income Tax Expense'], a_is)
+                depreciation_amortization_ttm = sum_ttm(q_cf, ['Depreciation And Amortization', 'Depreciation'], a_cf)
+                capital_expenditures_ttm = sum_ttm(q_cf, ['Capital Expenditures', 'Capital Expenditure', 'Capex', 'Property, Plant and Equipment', 'Additions to Property, Plant and Equipment', 'Purchase of Property, Plant and Equipment', 'Net Investment in Property, Plant and Equipment', 'Capital Spending', 'Investments in Property, Plant and Equipment', 'Acquisition of Property, Plant and Equipment'], a_cf)
                 # Ensure CapEX is positive (outflow)
                 if capital_expenditures_ttm is not None:
                     capital_expenditures_ttm = abs(capital_expenditures_ttm)
+                else:
+                    print(f"Debug: CapEx not found for {ticker}. Tried keys: {['Capital Expenditures', 'Capital Expenditure', 'Capex', 'Property, Plant and Equipment', 'Additions to Property, Plant and Equipment', 'Purchase of Property, Plant and Equipment', 'Net Investment in Property, Plant and Equipment', 'Capital Spending', 'Investments in Property, Plant and Equipment', 'Acquisition of Property, Plant and Equipment']}. Available in q_cf: {list(q_cf.index) if not q_cf.empty else 'Empty'}, a_cf: {list(a_cf.index) if not a_cf.empty else 'Empty'}")
                 
                 # Change in Working Capital: Try cash flow first, else estimate
-                change_wc_ttm = sum_ttm(q_cf, ['Change In Working Capital'])
+                change_wc_ttm = sum_ttm(q_cf, ['Change In Working Capital'], a_cf)
                 if change_wc_ttm is not None:
                     note = "From Cash Flow"
                     # Ensure Change in WC is positive (outflow magnitude)
@@ -231,10 +296,27 @@ def process_excel_file(file_path='data_population.xlsx'):
                 # Append shares type to note
                 note += f"; Shares: {shares_type}"
                 
-                # Revenue TTM Date: Date of latest quarterly report (date only, no time)
-                revenue_ttm_date = q_is.columns[0] if not q_is.empty else None
+                # Add notes for missing key data and data source
+                data_source = "Quarterly" if not q_is.empty else "Annual (fallback)"
+                note += f"; Data Source: {data_source}"
+                if ebit_ttm is None:
+                    note += "; EBIT: Not available"
+                    print(f"Debug: EBIT not found for {ticker}. Available in q_is: {list(q_is.index) if not q_is.empty else 'Empty'}, a_is: {list(a_is.index) if not a_is.empty else 'Empty'}")
+                if ebitda_ttm is None:
+                    note += "; EBITDA: Not available"
+                if net_income_ttm is None:
+                    note += "; Net Income: Not available"
+                if revenue_ttm is None:
+                    note += "; Revenue TTM: Not available"
+                
+                # Revenue TTM Date: Date of latest quarterly report, fallback to annual
+                revenue_ttm_date = None
+                if not q_is.empty:
+                    revenue_ttm_date = q_is.columns[0]
+                elif not a_is.empty:
+                    revenue_ttm_date = a_is.columns[0]
                 if isinstance(revenue_ttm_date, pd.Timestamp):
-                    revenue_ttm_date = revenue_ttm_date.date()
+                    revenue_ttm_date = str(revenue_ttm_date.date())  # Convert to string date
                 
                 # Oldest Annual Revenue and Year (find oldest with data, date only)
                 oldest_annual_revenue = None
@@ -246,15 +328,17 @@ def process_excel_file(file_path='data_population.xlsx'):
                                 val = a_is.loc[key, col]
                                 if pd.notna(val):
                                     oldest_annual_revenue = val
-                                    oldest_revenue_year = col.date() if isinstance(col, pd.Timestamp) else col
+                                    oldest_revenue_year = str(col.date()) if isinstance(col, pd.Timestamp) else str(col)
                                     break
                         if oldest_annual_revenue is not None:
                             break
                     if oldest_annual_revenue is None:
                         print(f"Debug: No revenue data found in annuals for {ticker}.")
                 
-                # Balance Sheet
+                # Balance Sheet (latest quarterly, fallback to annual)
                 latest_bs = q_bs.iloc[:, 0] if not q_bs.empty else pd.Series(dtype=float)
+                if latest_bs.empty and not t.balance_sheet.empty:
+                    latest_bs = t.balance_sheet.iloc[:, 0]
                 # Try multiple keys for shareholders equity
                 shareholders_equity = None
                 for key in ['Total Stockholder Equity', 'Stockholders Equity', 'Shareholders Equity', 'Equity', 'Total Equity']:
