@@ -23,7 +23,7 @@ def fetch_and_save(ticker):
         a_is = t.financials
         
         # Basic info
-        currency = info.get('currency', 'N/A')
+        currency = info.get('financialCurrency', 'N/A')  # Use financialCurrency for reporting currency
         nationality = info.get('country', 'N/A')
         # Diluted Average Shares from latest quarterly income statement, fallback to Basic, then to current shares
         shares_outstanding = None
@@ -178,7 +178,7 @@ def process_excel_file(file_path='data_population.xlsx'):
                 a_is = t.financials
                 
                 # Basic info
-                currency = info.get('currency', 'N/A')
+                currency = info.get('financialCurrency', 'N/A')  # Use financialCurrency for reporting currency
                 nationality = info.get('country', 'N/A')
                 # Diluted Average Shares from latest quarterly income statement, fallback to Basic, then to current shares
                 shares_outstanding = None
